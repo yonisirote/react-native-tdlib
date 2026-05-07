@@ -39,7 +39,7 @@
 
 Building a Telegram client should not start with an hour-long TDLib compile. This library ships **prebuilt** TDLib binaries for iOS (`xcframework`, device + simulator) and Android (`arm64-v8a`, `armeabi-v7a`, `x86_64`), wraps the whole API in a single RN module, and streams every update to JS through `NativeEventEmitter`.
 
-- 🚀 **52 first-class methods** — auth, chats, messages, reactions, files, options, users.
+- 🚀 **53 first-class methods** — auth, chats, messages, reactions, files, options, users.
 - 🔄 **Real-time updates** — new messages, typing, read receipts, download progress, reactions.
 - 🧩 **Cross-platform parity** — iOS and Android emit the same TDLib JSON shape. Write once.
 - 🟦 **Fully typed** — `.d.ts` covers every method, event and result.
@@ -91,6 +91,9 @@ A full Telegram-like reference client ships under [`example/`](./example): login
 git clone https://github.com/vladlenskiy/react-native-tdlib.git
 cd react-native-tdlib/example && npm install
 cd ios && pod install && cd ..
+# Provide your TDLib api_id / api_hash from https://my.telegram.org/apps:
+cp .env.example .env
+$EDITOR .env
 npx react-native run-ios       # or run-android
 ```
 
@@ -105,7 +108,7 @@ _Using `react-native-tdlib` in production?_ Open a PR adding your project here, 
 ## Documentation
 
 - **[Getting Started →](./docs/getting-started.md)** — install, auth flow, first chat.
-- **[API Reference →](./docs/api-reference.md)** — all 52 methods, grouped.
+- **[API Reference →](./docs/api-reference.md)** — all 53 methods, grouped.
 - **[Cookbook →](./docs/cookbook.md)** — practical recipes (messages, reactions, files, options, typing).
 - **[Events →](./docs/events.md)** — `tdlib-update` stream, update types cheatsheet.
 - **[Platform Parity →](./docs/platform-parity.md)** — how iOS and Android stay in sync.
