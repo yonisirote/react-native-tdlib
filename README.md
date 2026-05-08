@@ -2,7 +2,7 @@
 
 <p align="center">
   The fastest way to build a real Telegram client in React Native.<br />
-  Official <a href="https://github.com/tdlib/td">TDLib</a> under the hood, prebuilt binaries, one API on iOS and Android.
+  <a href="https://github.com/tdlib/td">TDLib</a> under the hood, prebuilt binaries, one API on iOS and Android. Listed in the official <a href="https://github.com/tdlib/td/blob/master/example/README.md#using-tdlib-in-javascript-projects">TDLib documentation</a> under JavaScript wrappers.
 </p>
 
 <p align="center">
