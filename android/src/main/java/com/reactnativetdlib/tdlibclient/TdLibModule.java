@@ -116,12 +116,16 @@ public class TdLibModule extends ReactContextBaseJavaModule {
             Map<String, Object> requestMap = request.toHashMap();
             TdApi.Function function = convertMapToFunction(requestMap);
 
-            client.send(function, new Client.ResultHandler() {
-                @Override
-                public void onResult(TdApi.Object object) {
-                    lowLevelResponses.offer(object);
-                }
-            });
+            if (highLevelStarted) {
+                client.send(function, null, null);
+            } else {
+                client.send(function, new Client.ResultHandler() {
+                    @Override
+                    public void onResult(TdApi.Object object) {
+                        lowLevelResponses.offer(object);
+                    }
+                });
+            }
             promise.resolve("Request sent successfully");
         } catch (Exception e) {
             promise.reject("SEND_EXCEPTION", e.getMessage());
@@ -191,7 +195,7 @@ public class TdLibModule extends ReactContextBaseJavaModule {
     @ReactMethod
     public void startTdLib(ReadableMap parameters, Promise promise) {
         try {
-            if (highLevelStarted) {
+            if (client != null) {
                 promise.resolve("TDLib already started");
                 return;
             }
