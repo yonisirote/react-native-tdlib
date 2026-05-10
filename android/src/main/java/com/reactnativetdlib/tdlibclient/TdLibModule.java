@@ -25,10 +25,10 @@ import com.google.gson.Gson;
 
 import org.drinkless.tdlib.Client;
 import org.drinkless.tdlib.TdApi;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.Map;
 import java.util.HashMap;
 import org.json.JSONObject;
@@ -52,7 +52,9 @@ import androidx.annotation.NonNull;
 
 public class TdLibModule extends ReactContextBaseJavaModule {
     private static final String TAG = "TdLibModule";
-    private Client client;
+    private volatile Client client;
+    private volatile boolean highLevelStarted = false;
+    private final BlockingQueue<TdApi.Object> lowLevelResponses = new LinkedBlockingQueue<>();
     private final Gson gson = TdLibJson.GSON;
 
     private final ReactApplicationContext reactContext;
@@ -70,17 +72,8 @@ public class TdLibModule extends ReactContextBaseJavaModule {
     @ReactMethod
     public void td_json_client_create(Promise promise) {
         try {
-            if (client == null) {
-                client = Client.create(
-                        new Client.ResultHandler() {
-                            @Override
-                            public void onResult(TdApi.Object object) {
-                                Log.d(TAG, "Global Update: " + gson.toJson(object));
-                            }
-                        },
-                        null,
-                        null
-                );
+            boolean created = ensureClient();
+            if (created) {
                 promise.resolve("TDLib client created");
             } else {
                 promise.resolve("TDLib client already exists");
@@ -123,9 +116,12 @@ public class TdLibModule extends ReactContextBaseJavaModule {
             Map<String, Object> requestMap = request.toHashMap();
             TdApi.Function function = convertMapToFunction(requestMap);
 
-            // Fire-and-forget — matches iOS and C API semantics.
-            // Responses surface via the global update handler (tdlib-update event).
-            client.send(function, null, null);
+            client.send(function, new Client.ResultHandler() {
+                @Override
+                public void onResult(TdApi.Object object) {
+                    lowLevelResponses.offer(object);
+                }
+            });
             promise.resolve("Request sent successfully");
         } catch (Exception e) {
             promise.reject("SEND_EXCEPTION", e.getMessage());
@@ -154,20 +150,18 @@ public class TdLibModule extends ReactContextBaseJavaModule {
                 return;
             }
 
-            CountDownLatch latch = new CountDownLatch(1);
-            AtomicReference<TdApi.Object> responseRef = new AtomicReference<>();
+            if (highLevelStarted) {
+                promise.reject(
+                    "RECEIVE_LOOP_ACTIVE",
+                    "Cannot use td_json_client_receive while the high-level API (startTdLib) is active. " +
+                        "Use NativeEventEmitter to listen for tdlib-update events instead."
+                );
+                return;
+            }
 
-            client.send(null, new Client.ResultHandler() {
-                @Override
-                public void onResult(TdApi.Object object) {
-                    responseRef.set(object);
-                    latch.countDown();
-                }
-            });
-
-            boolean awaitSuccess = latch.await(10, TimeUnit.SECONDS);
-            if (awaitSuccess && responseRef.get() != null) {
-                promise.resolve(gson.toJson(responseRef.get()));
+            TdApi.Object response = lowLevelResponses.poll(10, TimeUnit.SECONDS);
+            if (response != null) {
+                promise.resolve(gson.toJson(response));
             } else {
                 promise.reject("RECEIVE_ERROR", "No response from TDLib");
             }
@@ -197,57 +191,13 @@ public class TdLibModule extends ReactContextBaseJavaModule {
     @ReactMethod
     public void startTdLib(ReadableMap parameters, Promise promise) {
         try {
-            if (client != null) {
+            if (highLevelStarted) {
                 promise.resolve("TDLib already started");
                 return;
             }
 
-            client = Client.create(
-                new Client.ResultHandler() {
-                    @Override
-                    public void onResult(TdApi.Object object) {
-                        WritableMap map = Arguments.createMap();
-                        String json = gson.toJson(object);
-
-                        // Match iOS: TDLib-style camelCase type and raw=direct TDLib JSON
-                        String simple = object.getClass().getSimpleName();
-                        String type = simple.isEmpty()
-                            ? simple
-                            : Character.toLowerCase(simple.charAt(0)) + simple.substring(1);
-
-                        map.putString("type", type);
-                        map.putString("raw", json);
-
-                        getReactApplicationContext()
-                            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
-                            .emit("tdlib-update", map);
-
-                        // Tear down the client after TDLib fully closes so the next
-                        // startTdLib creates a fresh one (logout/destroy path).
-                        if (object instanceof TdApi.UpdateAuthorizationState) {
-                            TdApi.AuthorizationState st =
-                                ((TdApi.UpdateAuthorizationState) object).authorizationState;
-                            if (st instanceof TdApi.AuthorizationStateClosed) {
-                                client = null;
-                            }
-                        }
-
-                        if (object instanceof TdApi.UpdateMessageInteractionInfo) {
-                            TdApi.UpdateMessageInteractionInfo interaction =
-                                    (TdApi.UpdateMessageInteractionInfo) object;
-                            Log.d("TDLib", "Interaction update for msg " + interaction.messageId);
-                        }
-
-                        if (object instanceof TdApi.UpdateMessageReactions) {
-                            TdApi.UpdateMessageReactions reaction =
-                                    (TdApi.UpdateMessageReactions) object;
-                            Log.d("TDLib", "Reactions update for msg " + reaction.messageId);
-                        }
-                    }
-                },
-                null,
-                null
-            );
+            ensureClient();
+            lowLevelResponses.clear();
 
 
             Client.execute(new TdApi.SetLogVerbosityLevel(5));
@@ -389,6 +339,8 @@ public void destroy(Promise promise) {
                 if (object instanceof TdApi.Ok) {
                     // TDLib accepted the request; mark local reference cleared
                     client = null;
+                    highLevelStarted = false;
+                    lowLevelResponses.clear();
                     promise.resolve("TDLib destroyed and local client reference cleared");
                 } else if (object instanceof TdApi.Error) {
                     TdApi.Error error = (TdApi.Error) object;
@@ -1681,6 +1633,70 @@ public void addComment(
 
     // =================================== Helpers ========================================
 
+    private synchronized boolean ensureClient() {
+        if (client != null) {
+            return false;
+        }
+
+        client = Client.create(
+            new Client.ResultHandler() {
+                @Override
+                public void onResult(TdApi.Object object) {
+                    emitTdLibUpdate(object);
+                }
+            },
+            null,
+            null
+        );
+        return true;
+    }
+
+    private void emitTdLibUpdate(TdApi.Object object) {
+        if (!highLevelStarted) {
+            lowLevelResponses.offer(object);
+        }
+
+        WritableMap map = Arguments.createMap();
+        String json = gson.toJson(object);
+
+        // Match iOS: TDLib-style camelCase type and raw=direct TDLib JSON.
+        String simple = object.getClass().getSimpleName();
+        String type = simple.isEmpty()
+            ? simple
+            : Character.toLowerCase(simple.charAt(0)) + simple.substring(1);
+
+        map.putString("type", type);
+        map.putString("raw", json);
+
+        reactContext
+            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+            .emit("tdlib-update", map);
+
+        // Tear down the client after TDLib fully closes so the next
+        // startTdLib creates a fresh one (logout/destroy path).
+        if (object instanceof TdApi.UpdateAuthorizationState) {
+            TdApi.AuthorizationState st =
+                ((TdApi.UpdateAuthorizationState) object).authorizationState;
+            if (st instanceof TdApi.AuthorizationStateClosed) {
+                client = null;
+                highLevelStarted = false;
+                lowLevelResponses.clear();
+            }
+        }
+
+        if (object instanceof TdApi.UpdateMessageInteractionInfo) {
+            TdApi.UpdateMessageInteractionInfo interaction =
+                (TdApi.UpdateMessageInteractionInfo) object;
+            Log.d("TDLib", "Interaction update for msg " + interaction.messageId);
+        }
+
+        if (object instanceof TdApi.UpdateMessageReactions) {
+            TdApi.UpdateMessageReactions reaction =
+                (TdApi.UpdateMessageReactions) object;
+            Log.d("TDLib", "Reactions update for msg " + reaction.messageId);
+        }
+    }
+
     private void setTdLibParameters(ReadableMap parameters, Promise promise) {
         try {
             TdApi.SetTdlibParameters tdlibParameters = new TdApi.SetTdlibParameters();
@@ -1707,6 +1723,7 @@ public void addComment(
                 @Override
                 public void onResult(TdApi.Object object) {
                     if (object instanceof TdApi.Ok) {
+                        highLevelStarted = true;
                         promise.resolve("TDLib parameters set successfully");
                     } else if (object instanceof TdApi.Error) {
                         TdApi.Error error = (TdApi.Error) object;
